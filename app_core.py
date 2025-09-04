@@ -28,7 +28,7 @@ except Exception:
 # ===== Paths (relative & cloud-safe) =====
 SCRIPT_DIR   = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR
-PACK_PATH    = PROJECT_ROOT / "kb" / "v1" / "knowledge_pack.md"  # required at deploy
+PACK_PATH    = PROJECT_ROOT / "v1" / "knowledge_pack.md"  # required at deploy
 LOGO_PATH    = PROJECT_ROOT / "logo.png"  # optional (used by UI)
 
 # ===== Provider selection (DeepSeek preferred if base_url provided) =====
