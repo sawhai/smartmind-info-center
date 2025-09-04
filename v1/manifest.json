@@ -1,0 +1,16 @@
+{
+  "kb_version": "v1",
+  "generated_at_utc": "2025-09-01T19:36:08.100571Z",
+  "source_root": "/Users/ha/My Drive/SmartMind Consultation/Chatbots/docs",
+  "outputs_root": "/Users/ha/My Drive/SmartMind Consultation/Chatbots/kb/v1",
+  "files": [
+    {
+      "stem": "smartmind_docs",
+      "input_pdf": "/Users/ha/My Drive/SmartMind Consultation/Chatbots/docs/smartmind_docs.pdf",
+      "pdf_sha256": "67e74bd9b274fc0ff2cf64e844e6b3d089216f531179117f61259b0343e3fe15",
+      "estimated_pages": 99,
+      "markdown_path": "/Users/ha/My Drive/SmartMind Consultation/Chatbots/kb/v1/markdown/smartmind_docs.md",
+      "json_path": "/Users/ha/My Drive/SmartMind Consultation/Chatbots/kb/v1/json/smartmind_docs.json"
+    }
+  ]
+}
