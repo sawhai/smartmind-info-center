@@ -1,41 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, json, re, time
+import os, json, re, pickle
 from pathlib import Path
 from typing import Tuple, List, Dict
 
 import numpy as np
 import streamlit as st
 from dotenv import load_dotenv
-from docx import Document
 from sklearn.neighbors import NearestNeighbors
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 # ---------------------------
-# Configuration - DEEPSEEK ONLY
+# Configuration - LIGHTWEIGHT VERSION
 # ---------------------------
 PROJECT_ROOT = Path.cwd()
 DATA_DIR = PROJECT_ROOT / "data"
 INDEX_DIR = DATA_DIR / "index"
 INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
-# Use relative path for deployment
 DOCX_PATH = PROJECT_ROOT / "docs" / "smartmind_docs_v2.docx"
-
 META_PATH = INDEX_DIR / "meta.jsonl"
-EMB_PATH  = INDEX_DIR / "embeddings.npy"
+EMB_PATH = INDEX_DIR / "embeddings.npy"
+VECTORIZER_PATH = INDEX_DIR / "vectorizer.pkl"
 
 # Load environment variables
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
-DEEPSEEK_MODEL_ENV = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
 
 # Constants
 TOP_K = 5
-COVERAGE_THRESHOLD = 0.22
-AVG_THRESHOLD = 0.18
+COVERAGE_THRESHOLD = 0.15  # Lower threshold for TF-IDF
+AVG_THRESHOLD = 0.12
 MAX_TOKENS = 1200
 TEMPERATURE = 0.2
 TOP_P = 1.0
@@ -90,12 +87,6 @@ html, body, [class*="css"] {
     margin: 1rem 0;
     text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
     letter-spacing: 1px;
-}
-
-.logo-image {
-    width: 120px;
-    height: auto;
-    margin-bottom: 1rem;
 }
 
 /* Tips section */
@@ -292,38 +283,22 @@ html, body, [class*="css"] {
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# Global model variable for caching
-if "embedding_model" not in st.session_state:
-    st.session_state.embedding_model = None
-
 # ---------------------------
 # Helper Functions
 # ---------------------------
-def normalize_ar(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r"[\u0640]", "", text)
-    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-    return text.strip()
-
 @st.cache_resource(show_spinner=False)
-def load_embedding_model():
-    return SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
-
-@st.cache_resource(show_spinner=False)
-def load_index() -> Tuple[NearestNeighbors, np.ndarray, List[str]]:
+def load_index() -> Tuple[NearestNeighbors, np.ndarray, List[str], TfidfVectorizer]:
     E = np.load(EMB_PATH)
     nn = NearestNeighbors(metric="cosine", algorithm="auto")
     nn.fit(E)
     with open(META_PATH, "r", encoding="utf-8") as f:
         meta_lines = f.readlines()
-    return nn, E, meta_lines
+    with open(VECTORIZER_PATH, 'rb') as f:
+        vectorizer = pickle.load(f)
+    return nn, E, meta_lines, vectorizer
 
-def embed_query(q: str) -> np.ndarray:
-    if st.session_state.embedding_model is None:
-        st.session_state.embedding_model = load_embedding_model()
-    
-    embedding = st.session_state.embedding_model.encode([q])[0]
+def embed_query(q: str, vectorizer: TfidfVectorizer) -> np.ndarray:
+    embedding = vectorizer.transform([q]).toarray()[0].astype(np.float32)
     # Normalize
     norm = np.linalg.norm(embedding)
     if norm == 0:
@@ -396,11 +371,8 @@ def check_setup():
         issues.append("✅ Knowledge document found")
     
     # Check index
-    if not (EMB_PATH.exists() and META_PATH.exists()):
-        if DOCX_PATH.exists() and DEEPSEEK_API_KEY:
-            issues.append("⚠️ Search index not built yet (will build automatically)")
-        else:
-            issues.append("❌ Cannot build search index (missing requirements)")
+    if not (EMB_PATH.exists() and META_PATH.exists() and VECTORIZER_PATH.exists()):
+        issues.append("❌ Search index not found. Please contact administrator.")
     else:
         issues.append("✅ Search index ready")
     
@@ -420,18 +392,9 @@ if critical_issues:
         st.write(issue)
     st.stop()
 
-# Check if index exists
-if not (EMB_PATH.exists() and META_PATH.exists()):
-    st.error("❌ Search index not found. Please contact administrator to build the search index.")
-    st.stop()
-
 # Load index
 try:
-    nn, E, meta_lines = load_index()
-    # Pre-load the embedding model
-    if st.session_state.embedding_model is None:
-        with st.spinner("Loading embedding model..."):
-            st.session_state.embedding_model = load_embedding_model()
+    nn, E, meta_lines, vectorizer = load_index()
 except Exception as e:
     st.error(f"❌ Failed to load search index: {str(e)}")
     st.stop()
@@ -530,7 +493,7 @@ if submit_button and user_question.strip():
     """, unsafe_allow_html=True)
     
     # Retrieve relevant passages
-    q_vec = embed_query(user_question)
+    q_vec = embed_query(user_question, vectorizer)
     n_neighbors = min(TOP_K, E.shape[0])
     distances, indices = nn.kneighbors(q_vec.reshape(1, -1), n_neighbors=n_neighbors)
     sims = 1.0 - distances[0]
@@ -541,7 +504,7 @@ if submit_button and user_question.strip():
     best_sim = float(sims[0]) if len(sims) else 0.0
     avg_sim = float(np.mean(sims)) if len(sims) else 0.0
     
-    # Check coverage
+    # Check coverage with lower thresholds for TF-IDF
     if best_sim < COVERAGE_THRESHOLD and avg_sim < AVG_THRESHOLD:
         answer = "لا أستطيع الإجابة اعتماداً على المستندات المزوّدة."
     elif best_sim < COVERAGE_THRESHOLD:

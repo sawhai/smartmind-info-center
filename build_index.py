@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build index during deployment - DeepSeek only version
+Build index during deployment - lightweight version without sentence-transformers
 """
 import os
 import sys
@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 import numpy as np
 from docx import Document
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 def main():
     print("Building search index during deployment...")
@@ -34,13 +35,6 @@ def main():
         sys.exit(1)
     
     try:
-        # Import sentence transformers for embeddings
-        from sentence_transformers import SentenceTransformer
-        
-        print("Loading embedding model (this may take a few minutes on first run)...")
-        model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
-        print("Model loaded successfully!")
-        
         print("Reading DOCX...")
         
         # Helper functions
@@ -109,13 +103,30 @@ def main():
                     })
             return chunks
 
-        def embed_texts_with_sentence_transformer(texts: list, model) -> np.ndarray:
-            print(f"Creating embeddings for {len(texts)} chunks...")
-            embeddings = model.encode(texts, show_progress_bar=True)
+        def create_tfidf_embeddings(texts: list) -> np.ndarray:
+            print(f"Creating TF-IDF embeddings for {len(texts)} chunks...")
+            # Use TF-IDF vectorizer which is lightweight and works well for Arabic
+            vectorizer = TfidfVectorizer(
+                max_features=1000,  # Limit features to keep memory low
+                ngram_range=(1, 2),  # Use unigrams and bigrams
+                lowercase=False,  # Keep Arabic case as is
+                stop_words=None
+            )
+            
+            embeddings = vectorizer.fit_transform(texts).toarray().astype(np.float32)
+            
             # Normalize embeddings
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
-            return embeddings / norms
+            embeddings = embeddings / norms
+            
+            # Save vectorizer for later use
+            import pickle
+            vectorizer_path = INDEX_DIR / "vectorizer.pkl"
+            with open(vectorizer_path, 'wb') as f:
+                pickle.dump(vectorizer, f)
+            
+            return embeddings
 
         def save_index(chunks: list, embeddings: np.ndarray):
             np.save(EMB_PATH, embeddings)
@@ -131,9 +142,9 @@ def main():
         chunks = chunk_pages(pages, target_chars=1800, overlap_chars=250)
         print(f"Created {len(chunks)} chunks")
         
-        print("Generating embeddings...")
+        print("Generating TF-IDF embeddings...")
         texts = [chunk["text"] for chunk in chunks]
-        embeddings = embed_texts_with_sentence_transformer(texts, model)
+        embeddings = create_tfidf_embeddings(texts)
         print("Embeddings created successfully")
         
         print("Saving index...")
