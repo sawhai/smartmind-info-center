@@ -37,8 +37,9 @@ def main():
         # Import sentence transformers for embeddings
         from sentence_transformers import SentenceTransformer
         
-        print("Loading embedding model...")
+        print("Loading embedding model (this may take a few minutes on first run)...")
         model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+        print("Model loaded successfully!")
         
         print("Reading DOCX...")
         

@@ -6,6 +6,7 @@ services:
       pip install -r requirements.txt
       python build_index.py
     startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    healthCheckPath: /healthz
     envVars:
       - key: DEEPSEEK_API_KEY
         sync: false
