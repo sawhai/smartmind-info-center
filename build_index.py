@@ -34,8 +34,15 @@ def main():
         from docx import Document
         from openai import OpenAI
         
-        # Initialize OpenAI client
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        # Initialize OpenAI client with minimal configuration
+        try:
+            client = OpenAI(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                timeout=60.0
+            )
+        except Exception as e:
+            print(f"Failed to initialize OpenAI client: {e}")
+            sys.exit(1)
         
         # Helper functions
         def normalize_ar(text: str) -> str:
