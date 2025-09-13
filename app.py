@@ -10,34 +10,29 @@ import streamlit as st
 from dotenv import load_dotenv
 from docx import Document
 from sklearn.neighbors import NearestNeighbors
+from sentence_transformers import SentenceTransformer
 
 # ---------------------------
-# Configuration - UPDATED FOR DEPLOYMENT
+# Configuration - DEEPSEEK ONLY
 # ---------------------------
 PROJECT_ROOT = Path.cwd()
 DATA_DIR = PROJECT_ROOT / "data"
 INDEX_DIR = DATA_DIR / "index"
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 INDEX_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# FIXED: Use relative path for deployment
+# Use relative path for deployment
 DOCX_PATH = PROJECT_ROOT / "docs" / "smartmind_docs_v2.docx"
 
 META_PATH = INDEX_DIR / "meta.jsonl"
 EMB_PATH  = INDEX_DIR / "embeddings.npy"
 
-# Load environment variables - UPDATED for deployment
+# Load environment variables
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip() or None
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
-DEEPSEEK_MODEL_ENV = os.getenv("DEEPSEEK_MODEL", "deepseek-reasoner").strip()
-OPENAI_FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-4o-mini").strip()
+DEEPSEEK_MODEL_ENV = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
 
 # Constants
-EMBED_MODEL = "text-embedding-3-large"
-EMBED_DIM = 3072
 TOP_K = 5
 COVERAGE_THRESHOLD = 0.22
 AVG_THRESHOLD = 0.18
@@ -55,7 +50,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS
+# Custom CSS (same as before)
 st.markdown("""
 <style>
 /* Hide Streamlit elements */
@@ -145,7 +140,7 @@ html, body, [class*="css"] {
     border: 1px solid #e0e0e0;
 }
 
-/* Chat bubbles - both on right side with icons */
+/* Chat bubbles with icons */
 .chat-bubble {
     max-width: 80%;
     margin: 1rem 0;
@@ -201,14 +196,6 @@ html, body, [class*="css"] {
 }
 
 /* Input styling */
-.input-section {
-    background: white;
-    padding: 1.5rem;
-    border-radius: 15px;
-    border: 2px solid #e0e0e0;
-    margin-bottom: 2rem;
-}
-
 .stTextInput > div > div > input {
     border-radius: 25px !important;
     padding: 1rem 1.5rem !important;
@@ -298,22 +285,16 @@ html, body, [class*="css"] {
     font-size: 1.8rem;
     margin-bottom: 1rem;
 }
-
-/* Setup warning */
-.setup-warning {
-    background: #fff3cd;
-    border: 1px solid #ffeaa7;
-    border-radius: 10px;
-    padding: 1.5rem;
-    margin: 2rem 0;
-    color: #856404;
-}
 </style>
 """, unsafe_allow_html=True)
 
 # Initialize session state
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+# Global model variable for caching
+if "embedding_model" not in st.session_state:
+    st.session_state.embedding_model = None
 
 # ---------------------------
 # Helper Functions
@@ -325,86 +306,9 @@ def normalize_ar(text: str) -> str:
     text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
     return text.strip()
 
-@st.cache_data(show_spinner=False)
-def read_docx_to_pages(docx_path: Path) -> List[Dict]:
-    title = docx_path.name
-    doc = Document(str(docx_path))
-    pages, buf, page_no = [], [], 1
-
-    def flush():
-        nonlocal buf, page_no
-        text = "\n".join(buf).strip()
-        if text:
-            pages.append({
-                "doc_id": docx_path.stem,
-                "title": title,
-                "page_number": page_no,
-                "text": normalize_ar(text)
-            })
-        buf = []
-        page_no += 1
-
-    for para in doc.paragraphs:
-        t = (para.text or "").strip()
-        if not t:
-            if buf: flush()
-            continue
-        buf.append(t)
-    if buf: flush()
-    return pages
-
-def chunk_pages(pages: List[Dict], target_chars=1800, overlap_chars=250) -> List[Dict]:
-    chunks = []
-    for pg in pages:
-        raw = pg["text"]
-        segments = re.split(r"(?:\n\n+|•|- |\u2022|\u25CF|•|\.|؛|:)\s*", raw)
-        segments = [s.strip() for s in segments if s and s.strip()]
-        buf = ""
-        for seg in segments:
-            if not buf:
-                buf = seg
-                continue
-            candidate = (buf + " " + seg).strip()
-            if len(candidate) <= target_chars:
-                buf = candidate
-            else:
-                if buf:
-                    chunks.append({
-                        "doc_id": pg["doc_id"], "title": pg["title"], "page_number": pg["page_number"],
-                        "chunk_id": f"{pg['doc_id']}_p{pg['page_number']}_c{len(chunks)}",
-                        "text": buf
-                    })
-                overlap = buf[-overlap_chars:] if len(buf) > overlap_chars else buf
-                buf = (overlap + " " + seg).strip()
-        if buf:
-            chunks.append({
-                "doc_id": pg["doc_id"], "title": pg["title"], "page_number": pg["page_number"],
-                "chunk_id": f"{pg['doc_id']}_p{pg['page_number']}_c{len(chunks)}",
-                "text": buf
-            })
-    return chunks
-
-def embed_texts_openai(texts: List[str]) -> np.ndarray:
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    E = np.zeros((len(texts), EMBED_DIM), dtype="float32")
-    bs, i = 64, 0
-    while i < len(texts):
-        batch = texts[i:i+bs]
-        clean = [(t or " ").replace("\n", " ").strip() for t in batch]
-        resp = client.embeddings.create(model=EMBED_MODEL, input=clean)
-        for j, e in enumerate(resp.data):
-            E[i+j] = np.array(e.embedding, dtype="float32")
-        i += bs
-    norms = np.linalg.norm(E, axis=1, keepdims=True)
-    norms[norms==0] = 1.0
-    return E / norms
-
-def save_index(chunks: List[Dict], E: np.ndarray):
-    np.save(EMB_PATH, E)
-    with open(META_PATH, "w", encoding="utf-8") as f:
-        for ch in chunks:
-            f.write(json.dumps(ch, ensure_ascii=False) + "\n")
+@st.cache_resource(show_spinner=False)
+def load_embedding_model():
+    return SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 
 @st.cache_resource(show_spinner=False)
 def load_index() -> Tuple[NearestNeighbors, np.ndarray, List[str]]:
@@ -416,12 +320,15 @@ def load_index() -> Tuple[NearestNeighbors, np.ndarray, List[str]]:
     return nn, E, meta_lines
 
 def embed_query(q: str) -> np.ndarray:
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    r = client.embeddings.create(model=EMBED_MODEL, input=[q.replace("\n", " ").strip()])
-    v = np.array(r.data[0].embedding, dtype="float32")
-    n = np.linalg.norm(v) or 1.0
-    return v / n
+    if st.session_state.embedding_model is None:
+        st.session_state.embedding_model = load_embedding_model()
+    
+    embedding = st.session_state.embedding_model.encode([q])[0]
+    # Normalize
+    norm = np.linalg.norm(embedding)
+    if norm == 0:
+        norm = 1.0
+    return embedding / norm
 
 def build_sources(meta_lines: List[str], idxs: np.ndarray, trim=900) -> str:
     out_lines = []
@@ -438,7 +345,7 @@ def call_deepseek(system_prompt: str, user_prompt: str) -> str:
     from openai import OpenAI as DeepSeekClient
     base = DEEPSEEK_BASE_URL.rstrip("/")
     bases = [base, base + "/v1"] if not base.endswith("/v1") else [base, base[:-3]]
-    candidates = ["deepseek-reasoner", "deepseek-chat"]
+    candidates = ["deepseek-chat", "deepseek-reasoner"]
 
     for b in bases:
         try:
@@ -462,21 +369,6 @@ def call_deepseek(system_prompt: str, user_prompt: str) -> str:
             continue
     raise Exception("DeepSeek failed")
 
-def call_openai_fallback(system_prompt: str, user_prompt: str) -> str:
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    comp = client.chat.completions.create(
-        model=OPENAI_FALLBACK_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        max_tokens=MAX_TOKENS
-    )
-    return comp.choices[0].message.content
-
 def clean_answer(text: str) -> str:
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     text = re.sub(r'\*(.*?)\*', r'\1', text)
@@ -491,13 +383,8 @@ def check_setup():
     issues = []
     
     # Check API keys
-    if not OPENAI_API_KEY:
-        issues.append("❌ OPENAI_API_KEY not set")
-    else:
-        issues.append("✅ OpenAI API key configured")
-        
     if not DEEPSEEK_API_KEY:
-        issues.append("⚠️ DEEPSEEK_API_KEY not set (will use OpenAI fallback)")
+        issues.append("❌ DEEPSEEK_API_KEY not set")
     else:
         issues.append("✅ DeepSeek API key configured")
     
@@ -510,7 +397,7 @@ def check_setup():
     
     # Check index
     if not (EMB_PATH.exists() and META_PATH.exists()):
-        if DOCX_PATH.exists() and OPENAI_API_KEY:
+        if DOCX_PATH.exists() and DEEPSEEK_API_KEY:
             issues.append("⚠️ Search index not built yet (will build automatically)")
         else:
             issues.append("❌ Cannot build search index (missing requirements)")
@@ -533,34 +420,18 @@ if critical_issues:
         st.write(issue)
     st.stop()
 
-# Check if index exists and needs to be built
+# Check if index exists
 if not (EMB_PATH.exists() and META_PATH.exists()):
-    if DOCX_PATH.exists() and OPENAI_API_KEY:
-        st.info("🔄 Building search index for the first time. This may take a few minutes...")
-        
-        try:
-            # Build index
-            pages = read_docx_to_pages(DOCX_PATH)
-            chunks = chunk_pages(pages, target_chars=1800, overlap_chars=250)
-            texts = [chunk["text"] for chunk in chunks]
-            
-            with st.spinner("Creating embeddings..."):
-                embeddings = embed_texts_openai(texts)
-            
-            save_index(chunks, embeddings)
-            st.success("✅ Search index built successfully!")
-            st.rerun()
-            
-        except Exception as e:
-            st.error(f"❌ Failed to build index: {str(e)}")
-            st.stop()
-    else:
-        st.error("Cannot build search index - missing requirements")
-        st.stop()
+    st.error("❌ Search index not found. Please contact administrator to build the search index.")
+    st.stop()
 
 # Load index
 try:
     nn, E, meta_lines = load_index()
+    # Pre-load the embedding model
+    if st.session_state.embedding_model is None:
+        with st.spinner("Loading embedding model..."):
+            st.session_state.embedding_model = load_embedding_model()
 except Exception as e:
     st.error(f"❌ Failed to load search index: {str(e)}")
     st.stop()
@@ -707,16 +578,11 @@ if submit_button and user_question.strip():
         </div>
         """, unsafe_allow_html=True)
         
-        # Generate answer
-        answer = None
+        # Generate answer with DeepSeek
         try:
-            if DEEPSEEK_API_KEY:
-                answer = call_deepseek(system_prompt, user_prompt)
-        except:
-            pass
-        
-        if answer is None:
-            answer = call_openai_fallback(system_prompt, user_prompt)
+            answer = call_deepseek(system_prompt, user_prompt)
+        except Exception as e:
+            answer = f"عذراً، حدث خطأ في توليد الإجابة: {str(e)}"
         
         spinner2.empty()
         answer = clean_answer(answer)

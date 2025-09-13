@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-Build index during deployment
+Build index during deployment - DeepSeek only version
 """
 import os
 import sys
+import json
+import re
 from pathlib import Path
+import numpy as np
+from docx import Document
 
 def main():
     print("Building search index during deployment...")
     
     # Check for required environment variable
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY environment variable not set")
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        print("Error: DEEPSEEK_API_KEY environment variable not set")
         sys.exit(1)
     
     # Set up paths
@@ -21,28 +26,21 @@ def main():
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     
     DOCX_PATH = PROJECT_ROOT / "docs" / "smartmind_docs_v2.docx"
+    META_PATH = INDEX_DIR / "meta.jsonl"
+    EMB_PATH = INDEX_DIR / "embeddings.npy"
     
     if not DOCX_PATH.exists():
         print(f"Error: Document not found at {DOCX_PATH}")
         sys.exit(1)
     
     try:
-        # Import required libraries
-        import json
-        import re
-        import numpy as np
-        from docx import Document
-        from openai import OpenAI
+        # Import sentence transformers for embeddings
+        from sentence_transformers import SentenceTransformer
         
-        # Initialize OpenAI client with minimal configuration
-        try:
-            client = OpenAI(
-                api_key=os.getenv("OPENAI_API_KEY"),
-                timeout=60.0
-            )
-        except Exception as e:
-            print(f"Failed to initialize OpenAI client: {e}")
-            sys.exit(1)
+        print("Loading embedding model...")
+        model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+        
+        print("Reading DOCX...")
         
         # Helper functions
         def normalize_ar(text: str) -> str:
@@ -110,34 +108,21 @@ def main():
                     })
             return chunks
 
-        def embed_texts_openai(texts: list) -> np.ndarray:
-            EMBED_MODEL = "text-embedding-3-large"
-            EMBED_DIM = 3072
-            
-            E = np.zeros((len(texts), EMBED_DIM), dtype="float32")
-            bs, i = 64, 0
-            while i < len(texts):
-                batch = texts[i:i+bs]
-                clean = [(t or " ").replace("\n", " ").strip() for t in batch]
-                resp = client.embeddings.create(model=EMBED_MODEL, input=clean)
-                for j, e in enumerate(resp.data):
-                    E[i+j] = np.array(e.embedding, dtype="float32")
-                i += bs
-            norms = np.linalg.norm(E, axis=1, keepdims=True)
-            norms[norms==0] = 1.0
-            return E / norms
+        def embed_texts_with_sentence_transformer(texts: list, model) -> np.ndarray:
+            print(f"Creating embeddings for {len(texts)} chunks...")
+            embeddings = model.encode(texts, show_progress_bar=True)
+            # Normalize embeddings
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            return embeddings / norms
 
-        def save_index(chunks: list, E: np.ndarray):
-            META_PATH = INDEX_DIR / "meta.jsonl"
-            EMB_PATH = INDEX_DIR / "embeddings.npy"
-            
-            np.save(EMB_PATH, E)
+        def save_index(chunks: list, embeddings: np.ndarray):
+            np.save(EMB_PATH, embeddings)
             with open(META_PATH, "w", encoding="utf-8") as f:
                 for ch in chunks:
                     f.write(json.dumps(ch, ensure_ascii=False) + "\n")
         
         # Process the document
-        print("Reading DOCX...")
         pages = read_docx_to_pages(DOCX_PATH)
         print(f"Found {len(pages)} pages")
         
@@ -147,7 +132,7 @@ def main():
         
         print("Generating embeddings...")
         texts = [chunk["text"] for chunk in chunks]
-        embeddings = embed_texts_openai(texts)
+        embeddings = embed_texts_with_sentence_transformer(texts, model)
         print("Embeddings created successfully")
         
         print("Saving index...")
